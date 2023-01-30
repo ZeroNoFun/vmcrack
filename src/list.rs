@@ -17,7 +17,7 @@ use tui::{
     Frame, Terminal,
 };
 
-use crate::emu::{EmuReport, RegState};
+use crate::emu::{EmuReport, RegState, Instruction};
 //use unicorn_engine::RegisterX86;
 
 use std::stringify;
@@ -79,13 +79,19 @@ impl<T> StatefulList<T> {
 /// Check the event handling at the bottom to see how to change the state on incoming events.
 /// Check the drawing logic for items on how to specify the highlighting style for selected items.
 pub struct EmuReportApp {
-    items: StatefulList<(u32, String, String, RegState)>,
+    instructions: StatefulList<(Instruction, RegState)>,
 }
 
 impl EmuReportApp {
     pub fn new(emu_report: &EmuReport) -> EmuReportApp {
+        let mut instructions = Vec::new();
+
+        for state in &emu_report.state {
+            instructions.push((state.instruction.clone(), state.reg_state.clone()));
+        }
+
         EmuReportApp {
-            items: StatefulList::with_items(emu_report.report.clone()),
+            instructions: StatefulList::with_items(instructions),
         }
     }
 
@@ -94,7 +100,7 @@ impl EmuReportApp {
     fn on_tick(&mut self) {}
 }
 
-pub fn emu_report(emu_report: EmuReport) -> Result<(), Box<dyn Error>> {
+pub fn emu_report(emu_report: &EmuReport) -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -139,9 +145,9 @@ fn run_app<B: Backend>(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Left => app.items.unselect(),
-                    KeyCode::Down => app.items.next(),
-                    KeyCode::Up => app.items.previous(),
+                    KeyCode::Left => app.instructions.unselect(),
+                    KeyCode::Down => app.instructions.next(),
+                    KeyCode::Up => app.instructions.previous(),
                     _ => {}
                 }
             }
@@ -172,11 +178,11 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut EmuReportApp) {
         });
 
     let items: Vec<ListItem> = app
-        .items
+        .instructions
         .items
         .iter()
-        .map(|i| {
-            let line = format!("0x{:X} {} {}", i.0, i.1, i.2);
+        .map(|(i, _)| {
+            let line = format!("0x{:X} {} {}", i.address, i.mnemonic, i.operands);
             ListItem::new(line).style(Style::default().fg(Color::White).bg(Color::Black))
         })
         .collect();
@@ -190,7 +196,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut EmuReportApp) {
         )
         .highlight_symbol(">> ");
 
-    f.render_stateful_widget(items, chunks[0], &mut app.items.state);
+    f.render_stateful_widget(items, chunks[0], &mut app.instructions.state);
 
     let register_block = Block::default()
         .borders(Borders::ALL)
@@ -200,7 +206,8 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut EmuReportApp) {
             Style::default().bg(Color::Black).fg(Color::White),
         ));
 
-    let register_state = app.items.items.get(app.items.get_selected()).unwrap().3.reg;
+    let register_state = app.instructions.items.get(app.instructions.get_selected())
+        .unwrap().1.reg;
 
     use unicorn_engine::RegisterX86::*;
     macro_rules! write_reg_span {

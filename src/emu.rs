@@ -40,25 +40,55 @@ impl RegState {
     }
 }
 
-struct EmuState {
-    instructions_emulated: Vec<(u32, u32, RegState)>,
+#[derive(Clone)]
+pub struct Instruction {
+    pub mnemonic: String,
+    pub operands: String,
+    pub address: u32,
+}
+
+impl Instruction {
+    fn new(mnemonic: String, operands: String, address: u32) -> Instruction {
+        Instruction {
+            mnemonic,
+            operands,
+            address,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct EmuState {
+    pub instruction: Instruction,
+    pub reg_state: RegState,
 }
 
 impl EmuState {
-    fn new() -> Self {
+    fn new(instruction: Instruction, reg_state: RegState) -> Self {
         EmuState {
-            instructions_emulated: Vec::new(),
+            instruction,
+            reg_state,
         }
     }
 }
 
 pub struct EmuReport {
-    pub report: Vec<(u32, String, String, RegState)>,
+    pub state: Vec<EmuState>, 
+    cs: capstone::Capstone,
 }
 
 impl EmuReport {
     fn new() -> Self {
-        EmuReport { report: Vec::new() }
+        EmuReport { 
+            state: Vec::new(),
+            cs: Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode32)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create capstone"),
+        }
     }
 }
 
@@ -105,8 +135,8 @@ fn map_to_vmem(vmem: &mut Vec<u8>, section: &[u8], vaddr: usize) {
 }
 
 pub fn emulate(file_path: impl AsRef<Path>, address: u64) {
-    let emu_state = EmuState::new();
-    let mut emu = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, emu_state).unwrap();
+    let emu_report = EmuReport::new();
+    let mut emu = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, emu_report).unwrap();
 
     let vmap = get_virtual_mapping(file_path);
     emu.mem_map(IMAGE_BASE, 1024 * 1024 * 4, Permission::ALL)
@@ -136,40 +166,28 @@ pub fn emulate(file_path: impl AsRef<Path>, address: u64) {
     };
 }
 
-fn handle_emu_error(emu: &mut Unicorn<EmuState>, _error: uc_error) {
-    let cs = Capstone::new()
-        .x86()
-        .mode(arch::x86::ArchMode::Mode32)
-        .syntax(arch::x86::ArchSyntax::Intel)
-        .detail(true)
-        .build()
-        .expect("Failed to create capstone");
-
-    let insns_emulated = &emu.get_data().instructions_emulated;
-    println!("Total: {}", insns_emulated.len());
-    let mut emulator_report = EmuReport::new();
-    for (address, size, reg_state) in insns_emulated {
-        let code_buf = emu
-            .mem_read_as_vec(*address as u64, *size as usize)
-            .unwrap();
-        let insns = cs.disasm_all(&code_buf, 0).unwrap();
-        let first_ins = insns.first().unwrap();
-        let (mnemonic, operands) = (first_ins.mnemonic().unwrap(),
-                                    first_ins.op_str().unwrap());
-        emulator_report.report.push((
-            *address as u32,
-            mnemonic.to_string(),
-            operands.to_string(),
-            *reg_state,
-        ));
-    }
-
-    emu_report(emulator_report).unwrap();
+fn handle_emu_error(emu: &mut Unicorn<EmuReport>, _error: uc_error) {
+    
+    emu_report(emu.get_data()).unwrap();
 }
 
-fn hook_code(emu: &mut Unicorn<EmuState>, address: u64, size: u32) {
+fn dissasm_at_address(emu: &mut Unicorn<EmuReport>, address: u64, size: usize) -> Instruction {
+    let cs = &emu.get_data().cs;
+    let code_buf = emu
+        .mem_read_as_vec(address, size)
+        .unwrap();
+    let insns = cs.disasm_all(&code_buf, 0).unwrap();
+    let first_ins = insns.first().unwrap();
+    let (mnemonic, operands) = (first_ins.mnemonic().unwrap(),
+                                    first_ins.op_str().unwrap());
+    Instruction::new(mnemonic.to_owned(),
+    operands.to_owned(),
+    address.try_into().unwrap())
+}
+
+fn hook_code(emu: &mut Unicorn<EmuReport>, address: u64, size: u32) {
+    let ins = dissasm_at_address(emu, address, size as usize); 
     let reg_state = RegState::from_emu(emu);
-    let data = emu.get_data_mut();
-    data.instructions_emulated
-        .push((address.try_into().unwrap(), size, reg_state));
+    let emu_state = EmuState::new(ins, reg_state);
+    emu.get_data_mut().state.push(emu_state);
 }
